@@ -1,8 +1,8 @@
 {
-  description = "dev-env for midnight miner";
+  description = "Scavenger Miner - Rust Dev Environment";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay.url = "github:oxalica/rust-overlay";
   };
@@ -11,10 +11,7 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ rust-overlay.overlays.default ];
-        pkgs = import nixpkgs {
-          inherit system overlays;
-        };
-
+        pkgs = import nixpkgs { inherit system overlays; };
         rustToolchain = pkgs.rust-bin.stable.latest.default;
       in
       {
@@ -28,7 +25,6 @@
             pkgs.git
             pkgs.protobuf
           ];
-
           shellHook = ''
             echo "midnight mine dev environment loaded"
             echo "Rust: $(rustc --version)"
