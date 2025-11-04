@@ -1,12 +1,11 @@
 use anyhow::Result;
-use ed25519_dalek::{SigningKey, VerifyingKey};
-use rand::rngs::OsRng;
-use tokio::fs;
+use ed25519_dalek::{SigningKey, VerifyingKey, Signer};
 
+use tokio::fs;
 use crate::address::{AddressBundle, AddressProvider};
 use crate::util::bech::{blake2b224, bech32_encode};
-use crate::util::cip8::cose_sign1_ed25519;
 use crate::Network;
+
 
 #[derive(Clone)]
 pub struct ShelleyProvider {
@@ -22,40 +21,40 @@ impl ShelleyProvider {
     }
 }
 
-impl ShelleyProvider {
-    fn build_enterprise_address(&self, pubkey: &[u8;32]) -> String {
-        // enterprise key address header: 0b0110_000n (type=0b0110=6, network id in lower 4 bits)
-        let header: u8 = (0b0110 << 4) | (self.network_id & 0x0f);
-        let pkh = blake2b224(pubkey);
-        let mut addr = Vec::with_capacity(1 + 28);
-        addr.push(header);
-        addr.extend_from_slice(&pkh);
-        bech32_encode(&self.hrp, &addr)
-    }
-}
 
 impl AddressProvider for ShelleyProvider {
     fn new_address(&self) -> Result<AddressBundle> {
+        use rand::rngs::OsRng;
         let mut rng = OsRng;
+
         let signing = SigningKey::generate(&mut rng);
         let verifying: VerifyingKey = (&signing).into();
+
         let pk = verifying.to_bytes();
         let sk = signing.to_bytes();
-        let address = self.build_enterprise_address(&pk);
+        let header: u8 = (0b0110 << 4) | (self.network_id & 0x0f);
+        let pkh = blake2b224(&pk);
+        let mut raw = Vec::with_capacity(1 + 28);
+        raw.push(header);
+        raw.extend_from_slice(&pkh);
+        let address = bech32_encode(&self.hrp, &raw);
 
-        // persist minimal keystore record for later donate_to (optional)
         let rec = serde_json::json!({
             "address": address,
             "pubkey_hex": hex::encode(pk),
             "privkey_hex": hex::encode(sk),
         });
+
         let path = format!("{}/{}.json", self.keystore_dir, hex::encode(pk));
         let _ = std::fs::write(path, serde_json::to_vec_pretty(&rec).unwrap());
 
-        Ok(AddressBundle { address, pubkey: pk, privkey: sk })
+        Ok(AddressBundle { address, pubkey: pk, privkey: sk, address_raw: raw })
     }
 
-    fn sign_cip8_message(&self, privkey: &[u8;32], _pubkey: &[u8;32], message: &str) -> Result<Vec<u8>> {
-        Ok(cose_sign1_ed25519(privkey, message))
+    fn sign_message_raw(&self, privkey: &[u8; 32], message: &str) -> Result<[u8;64]> {
+        // IMPORTANT: registration signs RAW MESSAGE BYTES
+        let sk = SigningKey::from_bytes(privkey);
+        let sig = sk.sign(message.as_bytes());
+        Ok(sig.to_bytes())
     }
 }

@@ -53,23 +53,39 @@ impl<P: AddressProvider + Clone> Miner<P> {
         Ok(())
     }
 
-    async fn register_address(&self, tandc: &TandCResponse, a: &AddressBundle) -> Result<()> {
-        // CIP-8/30 COSE_Sign1 signature over the exact T&C message string
-        let cose = self.provider.sign_cip8_message(&a.privkey, &a.pubkey, &tandc.message)?;
+async fn register_address(&self, tandc: &TandCResponse, a: &AddressBundle) -> Result<()> {
+        use crate::util::cip8::cose_sign1_ed25519_with_headers;
+
+        // EXACT T&C message (trim trailing newline just like the docs example formatting)
+        let payload = tandc.message.trim_end();
+
+        // Build CIP-8/COSE_Sign1:
+        // protected: {1:-8} (EdDSA)
+        // unprotected: { "address": <raw addr bytes>, "hashed": false }
+        // payload:    <payload>
+        let cose = cose_sign1_ed25519_with_headers(
+            &a.privkey,
+            payload,
+            &a.address_raw,
+            false,
+        );
+
         let sig_hex = hex::encode(cose);
         let pub_hex = hex::encode(a.pubkey);
-        let _receipt = self.client.register(&a.address, &sig_hex, &pub_hex).await?;
 
-        // optional donate_to (toggle + destination)
+        tracing::info!("registering address {}", a.address);
+        let _receipt = self.client.register(&a.address, &sig_hex, &pub_hex).await?;
+        tracing::info!("✅ registration successful");
+
+        // optional donate_to (env: SCAV_ENABLE_DONATE=1, SCAV_DONATE_TO=addr1...)
         let enable = std::env::var("SCAV_ENABLE_DONATE").unwrap_or_default() == "1";
         let dest = std::env::var("SCAV_DONATE_TO").unwrap_or_default();
-
         if enable && !dest.is_empty() && dest != a.address {
-            // spec: sign the text message exactly: "Assign accumulated Scavenger rights to: <dest>"
             let msg = format!("Assign accumulated Scavenger rights to: {}", dest);
-            let sig = self.provider.sign_cip8_message(&a.privkey, &a.pubkey, &msg)?;
-            let sig_hex = hex::encode(sig);
-            match self.client.donate_to(&dest, &a.address, &sig_hex).await {
+            // donate_to still expects a raw ed25519 sig over the text we send
+            let d_sig = self.provider.sign_message_raw(&a.privkey, &msg)?;
+            let d_hex = hex::encode(d_sig);
+            match self.client.donate_to(&dest, &a.address, &d_hex).await {
                 Ok(v) => tracing::info!("donate_to ok: {}", v),
                 Err(e) => tracing::warn!("donate_to failed (ignored): {e:?}"),
             }

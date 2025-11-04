@@ -77,6 +77,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
+name = "ashmaize"
+version = "0.1.0"
+source = "git+https://github.com/input-output-hk/ce-ashmaize#58d6a1fe3df2582e14d53b67292ce8a36d90e7e6"
+dependencies = [
+ "cryptoxide",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -297,6 +305,12 @@ dependencies = [
  "generic-array",
  "typenum",
 ]
+
+[[package]]
+name = "cryptoxide"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "facfae029ec4373769eb4bd936bcf537de1052abaee9f246e667c9443be6aa95"
 
 [[package]]
 name = "curve25519-dalek"
@@ -1378,6 +1392,7 @@ name = "scavenger-miner"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "ashmaize",
  "bech32",
  "blake2",
  "chrono",
@@ -1386,6 +1401,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "rand 0.8.5",
+ "rand_chacha 0.3.1",
  "reqwest",
  "serde",
  "serde_json",

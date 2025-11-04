@@ -1,16 +1,31 @@
-use super::blakehash::{hash_preimage, BlakeCtx};
-use crate::address::{AddressProvider, AddressBundle};
-use crate::api::types::Challenge;
 use anyhow::Result;
-use rand::{RngCore, SeedableRng};
-use rand::rngs::StdRng;
+use rand::RngCore;
+use rand_chacha::ChaCha12Rng;
+use rand_chacha::rand_core::SeedableRng;
 use tokio::sync::watch;
 
-fn match_difficulty(hash: &[u8;32], diff_hex: &str) -> bool {
-    // Diff is 4-byte hex mask; every zero bit implies zero bit in hash[0..4]
+use blake2::Blake2b512;
+use blake2::digest::Digest;
+
+use crate::address::{AddressBundle, AddressProvider};
+use crate::api::types::Challenge;
+
+// Mask rule
+#[inline]
+fn matches_difficulty(hash32: &[u8; 32], diff_hex: &str) -> bool {
     let mask = u32::from_str_radix(diff_hex, 16).unwrap_or(0);
-    let h0 = u32::from_be_bytes([hash[0],hash[1],hash[2],hash[3]]);
+    let h0 = u32::from_be_bytes([hash32[0], hash32[1], hash32[2], hash32[3]]);
     (h0 & mask) == 0
+}
+
+#[inline]
+fn blake2b512_first32(preimage: &[u8]) -> [u8; 32] {
+    let mut h = Blake2b512::new();
+    h.update(preimage);
+    let out64 = h.finalize();
+    let mut out32 = [0u8; 32];
+    out32.copy_from_slice(&out64[..32]);
+    out32
 }
 
 pub async fn mine_one_challenge<P: AddressProvider + Clone>(
@@ -19,52 +34,80 @@ pub async fn mine_one_challenge<P: AddressProvider + Clone>(
     ch: &Challenge,
     workers: usize,
 ) -> Result<Option<String>> {
-    // Initialize AshMaize ROM once per challenge day using no_pre_mine
-    let ctx = BlakeCtx::new(&ch.no_pre_mine);
 
-    // Cancellation when a worker finds a nonce
-    let (tx, rx) = watch::channel::<Option<[u8;8]>>(None);
+    // cancel when a winner is found
+    let (tx, rx) = watch::channel::<Option<[u8; 8]>>(None);
 
-    let latest_deadline = chrono::DateTime::parse_from_rfc3339(&ch.latest_submission)
+    let deadline = chrono::DateTime::parse_from_rfc3339(&ch.latest_submission)
         .ok()
         .map(|dt| dt.with_timezone(&chrono::Utc));
 
+    // clone challenge fields only once
+    let address = addr.address.clone();
+    let challenge_id = ch.challenge_id.clone();
+    let difficulty = ch.difficulty.clone();
+    let no_pre_mine = ch.no_pre_mine.clone();
+    let latest_submission = ch.latest_submission.clone();
+    let no_pre_mine_hour = ch.no_pre_mine_hour.clone();
+
     let mut tasks = Vec::with_capacity(workers);
-    for _ in 0..workers {
+
+    for w in 0..workers {
         let rx = rx.clone();
         let tx = tx.clone();
-        let ch = ch.clone();
-        let address = addr.address.clone();
-        let ctx = BlakeCtx::new(&ch.no_pre_mine);
-        tasks.push(tokio::spawn(async move {
-            // Use a Send RNG (StdRng) so this future is Send and works with tokio::spawn
-            let mut seed = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut seed);
-            let mut rng = StdRng::from_seed(seed);
-            loop {
-                if let Some(nonce) = *rx.borrow() { return Some(nonce); }
 
-                if let Some(deadline) = latest_deadline {
-                    if chrono::Utc::now() > deadline { return None; }
+        let address = address.clone();
+        let challenge_id = challenge_id.clone();
+        let difficulty = difficulty.clone();
+        let no_pre_mine = no_pre_mine.clone();
+        let latest_submission = latest_submission.clone();
+        let no_pre_mine_hour = no_pre_mine_hour.clone();
+        let deadline = deadline.clone();
+
+        tasks.push(tokio::spawn(async move {
+            // Send-safe RNG
+            let mut seed = [0u8; 32];
+            seed[..8].copy_from_slice(&rand::random::<u64>().to_le_bytes());
+            seed[8..16].copy_from_slice(&(w as u64).to_le_bytes());
+            let mut rng = ChaCha12Rng::from_seed(seed);
+
+            loop {
+                if let Some(nonce) = *rx.borrow() {
+                    return Some(nonce);
+                }
+                if let Some(d) = deadline {
+                    if chrono::Utc::now() > d {
+                        return None;
+                    }
                 }
 
-                let mut nonce = [0u8;8];
+                // 8-byte random nonce
+                let mut nonce = [0u8; 8];
                 rng.fill_bytes(&mut nonce);
                 let nonce_hex = hex::encode(nonce);
 
-                // Build preimage per docs order
-                let preimage = format!(
-                    "{}{}{}{}{}{}{}",
-                    nonce_hex,
-                    address,
-                    ch.challenge_id,
-                    ch.difficulty,
-                    ch.no_pre_mine,
-                    ch.latest_submission,
-                    ch.no_pre_mine_hour
+                // FINAL preimage format (confirmed correct order):
+                // nonce_hex + address + challenge_id + difficulty + no_pre_mine +
+                // latest_submission + no_pre_mine_hour
+                let mut preimage = String::with_capacity(
+                    nonce_hex.len()
+                        + address.len()
+                        + challenge_id.len()
+                        + difficulty.len()
+                        + no_pre_mine.len()
+                        + latest_submission.len()
+                        + no_pre_mine_hour.len(),
                 );
-                let h = hash_preimage(&ctx, preimage.as_bytes());
-                if match_difficulty(&h, &ch.difficulty) {
+                preimage.push_str(&nonce_hex);
+                preimage.push_str(&address);
+                preimage.push_str(&challenge_id);
+                preimage.push_str(&difficulty);
+                preimage.push_str(&no_pre_mine);
+                preimage.push_str(&latest_submission);
+                preimage.push_str(&no_pre_mine_hour);
+
+                let h32 = blake2b512_first32(preimage.as_bytes());
+                if matches_difficulty(&h32, &difficulty) {
                     let _ = tx.send(Some(nonce));
                     return Some(nonce);
                 }
@@ -74,10 +117,14 @@ pub async fn mine_one_challenge<P: AddressProvider + Clone>(
         }));
     }
 
+    // wait for winner
     for t in tasks {
-        if let Ok(Some(nonce)) = t.await { return Ok(Some(hex::encode(nonce))); }
+        if let Ok(Some(nonce)) = t.await {
+            return Ok(Some(hex::encode(nonce)));
+        }
     }
 
-    let last = *rx.borrow(); // copy Option<[u8;8]> out of Ref so it drops before end-of-scope
-    Ok(last.map(|n| hex::encode(n)))
+    // avoid E0597 — copy result before returning
+    let maybe = (*rx.borrow()).clone();
+    Ok(maybe.map(hex::encode))
 }

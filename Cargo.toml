@@ -15,6 +15,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 hex = "0.4"
 rand = { version = "0.8", features = ["std_rng"] }
+rand_chacha = "0.3"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 blake2 = "0.10"
 bech32 = "0.9"

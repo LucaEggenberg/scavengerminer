@@ -11,7 +11,14 @@ pub struct ScavengerClient {
 impl ScavengerClient {
     pub fn new(base: String) -> anyhow::Result<Self> {
         let base = Url::parse(&base)?;
-        let http = reqwest::Client::builder().build()?;
+        let http = reqwest::Client::builder()
+            .user_agent("Mozilla/5.0")
+            .default_headers({
+                let mut h = reqwest::header::HeaderMap::new();
+                h.insert(reqwest::header::ACCEPT, "*/*".parse().unwrap());
+                h
+            })
+            .build()?;
         Ok(Self { base, http })
     }
 
@@ -37,23 +44,44 @@ impl ScavengerClient {
         Ok(resp.json().await?)
     }
 
-    pub async fn submit_solution(&self, address: &str, challenge_id: &str, nonce_hex: &str) -> anyhow::Result<CryptoReceiptEnvelope> {
-        let url = self.base.join(&format!("/solution/{}/{}/{}", address, challenge_id, nonce_hex))?;
+    pub async fn submit_solution(
+        &self,
+        address: &str,
+        challenge_id: &str,
+        nonce_hex: &str,
+    ) -> anyhow::Result<CryptoReceiptEnvelope> {
+        let url = self
+            .base
+            .join(&format!("/solution/{}/{}/{}", address, challenge_id, nonce_hex))?;
         let resp = self.http.post(url).json(&serde_json::json!({})).send().await?;
-        let resp = resp.error_for_status()?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("submit failed: {} – {}", status, body);
+        }
         Ok(resp.json().await?)
     }
 
-    pub async fn donate_to(&self, destination_address: &str, original_address: &str, signature_hex: &str)
-        -> anyhow::Result<serde_json::Value>
-    {
+
+    pub async fn donate_to(
+        &self,
+        dest_addr: &str,
+        src_addr: &str,
+        sig_hex: &str,
+    ) -> anyhow::Result<String> {
         let url = self.base.join(&format!(
             "/donate_to/{}/{}/{}",
-            destination_address, original_address, signature_hex
+            dest_addr, src_addr, sig_hex
         ))?;
-        let resp = self.http.post(url).json(&serde_json::json!({})).send().await?;
-        let resp = resp.error_for_status()?;
-        Ok(resp.json().await?)
+
+        let resp = self.http
+            .post(url)
+            .json(&serde_json::json!({}))
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(resp.text().await?)
     }
 }
 

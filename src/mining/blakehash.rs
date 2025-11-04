@@ -15,3 +15,14 @@ pub fn hash_preimage(_ctx: &BlakeCtx, preimage: &[u8]) -> [u8; 32] {
     out.copy_from_slice(&full[..32]);
     out
 }
+
+pub fn difficulty_meets(hash: &[u8; 64], difficulty_hex: &str) -> bool {
+    // Difficulty arrives like "00001FFF"
+    // Compare prefix of hash to target
+    let target = match hex::decode(difficulty_hex) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+
+    hash.starts_with(&target)
+}

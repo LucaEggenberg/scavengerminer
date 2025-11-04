@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crate::address::{AddressProvider, AddressBundle};
+use crate::util::bech::bech32_decode_to_bytes;
 use std::sync::{Arc, Mutex};
 use std::fs;
 use std::path::PathBuf;
@@ -52,6 +53,7 @@ impl<P: AddressProvider + Clone> PrefillProvider<P> {
                                     address: addr.to_string(),
                                     pubkey: pk32,
                                     privkey: sk32,
+                                    address_raw: bech32_decode_to_bytes(addr),
                                 });
                             }
                         }
@@ -87,12 +89,7 @@ impl<P: AddressProvider + Clone> AddressProvider for PrefillProvider<P> {
         self.inner.new_address()
     }
 
-    fn sign_cip8_message(
-        &self,
-        privkey: &[u8; 32],
-        pubkey: &[u8; 32],
-        message: &str,
-    ) -> Result<Vec<u8>> {
-        self.inner.sign_cip8_message(privkey, pubkey, message)
+    fn sign_message_raw(&self, privkey: &[u8; 32], message: &str) -> Result<[u8; 64]> {
+        self.inner.sign_message_raw(privkey, message)
     }
 }
