@@ -2,21 +2,21 @@ use anyhow::Result;
 use crate::address::{AddressProvider, AddressBundle};
 use crate::util::bech::bech32_decode_to_bytes;
 
-use std::sync::{Arc, Mutex};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct PrefillProvider<P: AddressProvider + Clone> {
     inner: P,
-    queue: Arc<Mutex<Vec<AddressBundle>>>,
+    list: Arc<Mutex<Vec<AddressBundle>>>,
+    index: Arc<Mutex<usize>>,
 }
 
 impl<P: AddressProvider + Clone> PrefillProvider<P> {
     pub fn new(inner: P, keystore_dir: &str) -> Result<Self> {
         let mut entries: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
 
-        // load all keystore .json files
         for entry in fs::read_dir(keystore_dir)? {
             let e = entry?;
             let path = e.path();
@@ -28,7 +28,6 @@ impl<P: AddressProvider + Clone> PrefillProvider<P> {
             }
         }
 
-        // sort by oldest
         entries.sort_by_key(|(t, _)| *t);
 
         let mut list = Vec::new();
@@ -45,7 +44,6 @@ impl<P: AddressProvider + Clone> PrefillProvider<P> {
                             if pubkey.len() == 32 && privkey.len() == 32 {
                                 let mut pk32 = [0u8; 32];
                                 let mut sk32 = [0u8; 32];
-
                                 pk32.copy_from_slice(&pubkey);
                                 sk32.copy_from_slice(&privkey);
 
@@ -69,30 +67,48 @@ impl<P: AddressProvider + Clone> PrefillProvider<P> {
 
         Ok(Self {
             inner,
-            queue: Arc::new(Mutex::new(list)),
+            list: Arc::new(Mutex::new(list)),
+            index: Arc::new(Mutex::new(0)),
         })
     }
 }
 
 impl<P: AddressProvider + Clone> AddressProvider for PrefillProvider<P> {
-
-    fn all_addresses(&self) -> Result<Vec<AddressBundle>> {
-        Ok(self.queue.lock().unwrap().clone())
-    }
-
     fn new_address(&self) -> Result<AddressBundle> {
-        let mut q = self.queue.lock().unwrap();
-
-        if !q.is_empty() {
-            let b = q.remove(0);
-            println!("Using existing (oldest) address: {}", b.address);
-            return Ok(b);
-        }
-
+        // Fall back to delegating to the inner provider
         self.inner.new_address()
     }
 
     fn sign_message_raw(&self, privkey: &[u8; 32], message: &str) -> Result<[u8; 64]> {
         self.inner.sign_message_raw(privkey, message)
+    }
+
+    fn current_index(&self) -> usize {
+        *self.index.lock().unwrap()
+    }
+
+    fn total_addresses(&self) -> usize {
+        self.list.lock().unwrap().len()
+    }
+
+    fn next_address(&self) -> Result<AddressBundle> {
+        let mut list = self.list.lock().unwrap();
+
+        if list.is_empty() {
+            // No prefilled keys — generate a fresh one
+            return self.inner.new_address();
+        }
+
+        let mut i = self.index.lock().unwrap();
+        let idx = *i;
+        *i = (*i + 1) % list.len();
+
+        let a = list[idx].clone();
+        println!("Using existing address (rr index {}): {}", idx, a.address);
+        Ok(a)
+    }
+
+    fn all_addresses(&self) -> Result<Vec<AddressBundle>> {
+        Ok(self.list.lock().unwrap().clone())
     }
 }
