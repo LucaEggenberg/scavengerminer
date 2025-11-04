@@ -2,10 +2,13 @@ mod api;
 mod address;
 mod mining;
 mod util;
+mod dashboard;
 
+use mining::stats::GlobalStats;
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
-use crate::address::AddressProvider; // <— bring trait into scope so .new_address() works
+use tokio::sync::watch; 
+use crate::address::AddressProvider; 
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 pub enum Network { Mainnet, Preprod }
@@ -25,9 +28,9 @@ struct Cli {
     #[arg(long, env = "NETWORK", value_enum, default_value_t = Network::Preprod)]
     network: Network,
 
-    /// Number of worker threads per challenge
-    #[arg(long, env = "WORKERS", default_value_t = 8)]
-    workers: usize,
+    /// Number of worker threads per challenge (defaults to all CPU cores)
+    #[arg(long, env = "WORKERS")]
+    workers: Option<usize>,
 
     /// Log level (error|warn|info|debug|trace)
     #[arg(long, env = "RUST_LOG", default_value = "info")]
@@ -101,14 +104,12 @@ async fn cmd_mine(cli: Cli) -> anyhow::Result<()> {
     let addr_provider = address::prefill::PrefillProvider::new(shelley, &cli.keystore)?;
     let miner = Miner::new(client, addr_provider, cli.workers, cli.network);
 
-    // pass donate info via environment (miner reads through &self.client)
-    if cli.enable_donate && cli.donate_to.is_empty() {
-        tracing::warn!("ENABLE_DONATE=true but --donate-to is empty; donate will be skipped.");
-    }
+    // Single aggregated stats channel
+    let (tx_stats, rx_stats) = watch::channel(GlobalStats::new());
 
-    // store donate settings globally
-    std::env::set_var("SCAV_ENABLE_DONATE", if cli.enable_donate { "1" } else { "0" });
-    std::env::set_var("SCAV_DONATE_TO", cli.donate_to);
+    // Start dashboard
+    tokio::spawn(dashboard::launch_dashboard(rx_stats));
 
-    miner.run_loop(tandc).await
+    // Run miner with stats
+    miner.with_stats(tx_stats).run_loop(tandc).await
 }

@@ -3,8 +3,7 @@ use rand_chacha::{
     rand_core::{RngCore, SeedableRng},
     ChaCha12Rng,
 };
-use std::sync::Arc;
-use tokio::sync::watch;
+use std::sync::{mpsc, Arc, Mutex};
 
 use ashmaize::{Rom, RomGenerationType, hash};
 
@@ -14,12 +13,10 @@ use crate::api::types::Challenge;
 const LOOPS: u32 = 8;
 const INSTR: u32 = 256;
 
-/// Build ROM exactly matching CE spec
 fn build_rom(no_pre_mine_ascii: &str) -> Rom {
     let seed = no_pre_mine_ascii.as_bytes();
-
-    const ROM_SIZE: usize = 1_073_741_824; // 1 GiB
-    const PRE_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
+    const ROM_SIZE: usize = 1_073_741_824;
+    const PRE_SIZE: usize = 16 * 1024 * 1024;
     const MIXING: usize = 4;
 
     Rom::new(
@@ -32,23 +29,18 @@ fn build_rom(no_pre_mine_ascii: &str) -> Rom {
     )
 }
 
-/// Native ashmaize hash → returns 64-byte binary digest
 #[inline]
 fn ash_hash(preimage: &[u8], rom: &Rom) -> [u8; 64] {
     hash(preimage, rom, LOOPS, INSTR)
 }
 
 fn matches_diff(h: &[u8; 64], diff: &str) -> bool {
-    // Convert first 4 bytes to hex
     let h_hex = hex::encode(&h[0..4]);
-
     let h_val = u32::from_str_radix(&h_hex, 16).unwrap();
     let d_val = u32::from_str_radix(&diff[0..8], 16).unwrap();
-
     (h_val | d_val) == d_val
 }
 
-/// CE canonical preimage (EXACT Python version)
 fn build_preimage(
     nonce_hex: &str,
     address: &str,
@@ -75,7 +67,6 @@ fn build_preimage(
     s.push_str(no_pre_mine);
     s.push_str(latest_submission);
     s.push_str(no_pre_mine_hour);
-
     s
 }
 
@@ -88,7 +79,9 @@ pub async fn mine_one_challenge<P: AddressProvider + Clone>(
 
     let rom = Arc::new(build_rom(&ch.no_pre_mine));
 
-    let (tx, rx) = watch::channel::<Option<[u8; 8]>>(None);
+    // FIXED: Receiver wrapped in Arc<Mutex<_>>
+    let (tx_found, rx_inner) = mpsc::channel::<[u8; 8]>();
+    let rx_found = Arc::new(Mutex::new(rx_inner));
 
     let deadline = chrono::DateTime::parse_from_rfc3339(&ch.latest_submission)
         .ok()
@@ -101,12 +94,12 @@ pub async fn mine_one_challenge<P: AddressProvider + Clone>(
     let npm_h = ch.no_pre_mine_hour.clone();
     let latest = ch.latest_submission.clone();
 
-    let mut tasks = Vec::new();
+    let mut threads = Vec::new();
 
-    for w in 0..workers {
+    for worker_id in 0..workers {
         let rom = rom.clone();
-        let rx = rx.clone();
-        let tx = tx.clone();
+        let tx_found = tx_found.clone();
+        let rx_found = rx_found.clone(); // <-- now cloneable
 
         let address = address.clone();
         let challenge_id = challenge_id.clone();
@@ -116,28 +109,27 @@ pub async fn mine_one_challenge<P: AddressProvider + Clone>(
         let latest = latest.clone();
         let deadline = deadline.clone();
 
-        tasks.push(tokio::spawn(async move {
-            // deterministic independent rng per worker
+        threads.push(std::thread::spawn(move || {
             let mut seed = [0u8; 32];
-            seed[..8].copy_from_slice(&(w as u64).to_le_bytes());
+            seed[..8].copy_from_slice(&(worker_id as u64).to_le_bytes());
             let mut rng = ChaCha12Rng::from_seed(seed);
 
             loop {
-                if let Some(n) = *rx.borrow() {
-                    return Some(n);
-                }
-                if let Some(d) = deadline {
-                    if chrono::Utc::now() > d {
+                if let Some(dead) = deadline {
+                    if chrono::Utc::now() > dead {
                         return None;
                     }
                 }
 
-                // generate 8-byte nonce
+                // FIXED: safe shared receiver check
+                if rx_found.lock().unwrap().try_recv().is_ok() {
+                    return None;
+                }
+
                 let mut nonce = [0u8; 8];
                 rng.fill_bytes(&mut nonce);
                 let nonce_hex = hex::encode(nonce);
 
-                // canonical CE preimage string
                 let preimage = build_preimage(
                     &nonce_hex,
                     &address,
@@ -151,23 +143,20 @@ pub async fn mine_one_challenge<P: AddressProvider + Clone>(
                 let digest = ash_hash(preimage.as_bytes(), &rom);
 
                 if matches_diff(&digest, &difficulty) {
-                    let _ = tx.send(Some(nonce));
+                    let _ = tx_found.send(nonce);
                     return Some(nonce);
                 }
-
-                tokio::task::yield_now().await;
             }
         }));
     }
 
-    // collect first result
-    for t in tasks {
-        if let Ok(Some(nonce)) = t.await {
-            return Ok(Some(hex::encode(nonce)));
+    // unchanged
+    for t in threads {
+        match t.join() {
+            Ok(Some(nonce)) => return Ok(Some(hex::encode(nonce))),
+            _ => continue,
         }
     }
 
-    // final fallback without borrow lifetime issue
-    let maybe = *rx.borrow();
-    Ok(maybe.map(hex::encode))
+    Ok(None)
 }

@@ -1,26 +1,54 @@
 pub mod blakehash;
 pub mod worker;
+pub mod stats;
 
 use crate::api::{ScavengerClient, TandCResponse};
 use crate::address::{AddressProvider, AddressBundle};
 use anyhow::{Context, Result};
 use tracing::{info, warn};
+
 use crate::mining::worker::mine_one_challenge;
+use crate::mining::stats::GlobalStats;
 use crate::Network;
+use tokio::sync::watch;
 
 pub struct Miner<P: AddressProvider + Clone> {
     client: ScavengerClient,
     provider: P,
     workers: usize,
     network: Network,
+    stats: Option<watch::Sender<GlobalStats>>, // single aggregated stats channel
 }
 
 impl<P: AddressProvider + Clone> Miner<P> {
-    pub fn new(client: ScavengerClient, provider: P, workers: usize, network: Network) -> Self {
-        Self { client, provider, workers, network }
+    pub fn new(client: ScavengerClient, provider: P, workers: Option<usize>, network: Network) -> Self {
+        let workers = workers.unwrap_or_else(|| {
+            std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1)
+        });
+
+        Self {
+            client,
+            provider,
+            workers,
+            network,
+            stats: None,
+        }
+    }
+
+    /// Attach the single aggregated stats broadcaster
+    pub fn with_stats(mut self, tx_stats: watch::Sender<GlobalStats>) -> Self {
+        self.stats = Some(tx_stats);
+        self
+    }
+
+    pub fn worker_count(&self) -> usize {
+        self.workers
     }
 
     pub async fn run_loop(&self, tandc: TandCResponse) -> Result<()> {
+        // session-local counters we publish to dashboard
+        let mut session_stats = GlobalStats::new();
+
         loop {
             let env = self.client.get_challenge().await?;
             match env.code.as_str() {
@@ -28,15 +56,36 @@ impl<P: AddressProvider + Clone> Miner<P> {
                     let ch = env.challenge.context("missing challenge")?;
                     info!(id=%ch.challenge_id, diff=%ch.difficulty, "mining challenge");
 
-                    // Fresh address per solution attempt
+                    // Fresh address per attempt
                     let addr = self.provider.new_address()?;
                     self.register_address(&tandc, &addr).await?;
 
-                    // mine
-                    let found = mine_one_challenge(&self.provider, &addr, &ch, self.workers).await?;
+                    // Mine
+                    let found = mine_one_challenge(
+                        &self.provider,
+                        &addr,
+                        &ch,
+                        self.workers,
+                    ).await?;
+
                     if let Some(nonce_hex) = found {
                         info!(nonce=%nonce_hex, "submitting solution");
-                        let resp = self.client.submit_solution(&addr.address, &ch.challenge_id, &nonce_hex).await?;
+                        let resp = self.client
+                            .submit_solution(&addr.address, &ch.challenge_id, &nonce_hex)
+                            .await?;
+
+                        // Update session stats on success
+                        session_stats.solutions_submitted += 1;
+                        session_stats.last_nonce = Some(nonce_hex);
+                        session_stats.last_receipt = Some(resp.crypto_receipt.timestamp.clone());
+
+                        // If you later add an API to fetch token estimates, set token_estimate here:
+                        // session_stats.token_estimate = Some(fetched_value);
+
+                        if let Some(tx) = &self.stats {
+                            let _ = tx.send(session_stats.clone());
+                        }
+
                         info!(receipt=%resp.crypto_receipt.timestamp, "submitted ok");
                     } else {
                         warn!("no solution found before next challenge or deadline");
@@ -53,16 +102,11 @@ impl<P: AddressProvider + Clone> Miner<P> {
         Ok(())
     }
 
-async fn register_address(&self, tandc: &TandCResponse, a: &AddressBundle) -> Result<()> {
+    async fn register_address(&self, tandc: &TandCResponse, a: &AddressBundle) -> Result<()> {
         use crate::util::cip8::cose_sign1_ed25519_with_headers;
 
-        // EXACT T&C message (trim trailing newline just like the docs example formatting)
         let payload = tandc.message.trim_end();
 
-        // Build CIP-8/COSE_Sign1:
-        // protected: {1:-8} (EdDSA)
-        // unprotected: { "address": <raw addr bytes>, "hashed": false }
-        // payload:    <payload>
         let cose = cose_sign1_ed25519_with_headers(
             &a.privkey,
             payload,
@@ -74,22 +118,8 @@ async fn register_address(&self, tandc: &TandCResponse, a: &AddressBundle) -> Re
         let pub_hex = hex::encode(a.pubkey);
 
         tracing::info!("registering address {}", a.address);
-        let _receipt = self.client.register(&a.address, &sig_hex, &pub_hex).await?;
+        self.client.register(&a.address, &sig_hex, &pub_hex).await?;
         tracing::info!("✅ registration successful");
-
-        // optional donate_to (env: SCAV_ENABLE_DONATE=1, SCAV_DONATE_TO=addr1...)
-        let enable = std::env::var("SCAV_ENABLE_DONATE").unwrap_or_default() == "1";
-        let dest = std::env::var("SCAV_DONATE_TO").unwrap_or_default();
-        if enable && !dest.is_empty() && dest != a.address {
-            let msg = format!("Assign accumulated Scavenger rights to: {}", dest);
-            // donate_to still expects a raw ed25519 sig over the text we send
-            let d_sig = self.provider.sign_message_raw(&a.privkey, &msg)?;
-            let d_hex = hex::encode(d_sig);
-            match self.client.donate_to(&dest, &a.address, &d_hex).await {
-                Ok(v) => tracing::info!("donate_to ok: {}", v),
-                Err(e) => tracing::warn!("donate_to failed (ignored): {e:?}"),
-            }
-        }
 
         Ok(())
     }

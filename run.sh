@@ -6,7 +6,6 @@ export SCAVENGER_API="https://scavenger.prod.gd.midnighttge.io"
 RUST_LOG=info \
 ./target/release/scavenger-miner \
     --network mainnet \
-    --workers 8 \
     --keystore keystore_mainnet \
     mine
 # --enable-donate \
