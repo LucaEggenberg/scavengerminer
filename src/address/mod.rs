@@ -14,4 +14,5 @@ pub struct AddressBundle {
 pub trait AddressProvider: Send + Sync + 'static {
     fn new_address(&self) -> Result<AddressBundle>;
     fn sign_message_raw(&self, privkey: &[u8; 32], message: &str) -> Result<[u8; 64]>;
+    fn all_addresses(&self) -> Result<Vec<AddressBundle>>;
 }

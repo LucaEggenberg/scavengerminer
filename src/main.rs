@@ -2,9 +2,7 @@ mod api;
 mod address;
 mod mining;
 mod util;
-mod dashboard;
 
-use mining::stats::GlobalStats;
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 use tokio::sync::watch; 
@@ -102,14 +100,8 @@ async fn cmd_mine(cli: Cli) -> anyhow::Result<()> {
 
     let shelley = address::shelley::ShelleyProvider::new(cli.network, &cli.keystore).await?;
     let addr_provider = address::prefill::PrefillProvider::new(shelley, &cli.keystore)?;
-    let miner = Miner::new(client, addr_provider, cli.workers, cli.network);
-
-    // Single aggregated stats channel
-    let (tx_stats, rx_stats) = watch::channel(GlobalStats::new());
-
-    // Start dashboard
-    tokio::spawn(dashboard::launch_dashboard(rx_stats));
+    let mut miner = Miner::new(client, addr_provider, cli.workers, cli.network);
 
     // Run miner with stats
-    miner.with_stats(tx_stats).run_loop(tandc).await
+    miner.run_loop(tandc).await
 }

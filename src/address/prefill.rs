@@ -1,11 +1,11 @@
 use anyhow::Result;
 use crate::address::{AddressProvider, AddressBundle};
 use crate::util::bech::bech32_decode_to_bytes;
+
 use std::sync::{Arc, Mutex};
 use std::fs;
 use std::path::PathBuf;
 
-/// Holds inner provider + sorted (oldest→newest) address queue.
 #[derive(Clone)]
 pub struct PrefillProvider<P: AddressProvider + Clone> {
     inner: P,
@@ -16,7 +16,7 @@ impl<P: AddressProvider + Clone> PrefillProvider<P> {
     pub fn new(inner: P, keystore_dir: &str) -> Result<Self> {
         let mut entries: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
 
-        // Collect all *.json keystore entries with their timestamps
+        // load all keystore .json files
         for entry in fs::read_dir(keystore_dir)? {
             let e = entry?;
             let path = e.path();
@@ -28,12 +28,11 @@ impl<P: AddressProvider + Clone> PrefillProvider<P> {
             }
         }
 
-        // Sort by oldest → newest
+        // sort by oldest
         entries.sort_by_key(|(t, _)| *t);
 
         let mut list = Vec::new();
 
-        // Load address bundles in sorted order
         for (_, path) in entries {
             if let Ok(data) = fs::read_to_string(&path) {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
@@ -46,6 +45,7 @@ impl<P: AddressProvider + Clone> PrefillProvider<P> {
                             if pubkey.len() == 32 && privkey.len() == 32 {
                                 let mut pk32 = [0u8; 32];
                                 let mut sk32 = [0u8; 32];
+
                                 pk32.copy_from_slice(&pubkey);
                                 sk32.copy_from_slice(&privkey);
 
@@ -62,7 +62,7 @@ impl<P: AddressProvider + Clone> PrefillProvider<P> {
             }
         }
 
-        println!("✅ Loaded {} existing addresses (oldest first)", list.len());
+        println!("Loaded {} existing addresses (oldest first)", list.len());
         for (i, a) in list.iter().enumerate() {
             println!("  {}. {}", i + 1, a.address);
         }
@@ -75,17 +75,20 @@ impl<P: AddressProvider + Clone> PrefillProvider<P> {
 }
 
 impl<P: AddressProvider + Clone> AddressProvider for PrefillProvider<P> {
+
+    fn all_addresses(&self) -> Result<Vec<AddressBundle>> {
+        Ok(self.queue.lock().unwrap().clone())
+    }
+
     fn new_address(&self) -> Result<AddressBundle> {
         let mut q = self.queue.lock().unwrap();
 
-        // Oldest first = pop from front (pop(0))
         if !q.is_empty() {
             let b = q.remove(0);
-            println!("🔁 Using existing (oldest) address: {}", b.address);
+            println!("Using existing (oldest) address: {}", b.address);
             return Ok(b);
         }
 
-        // No more existing keys – generate a fresh one
         self.inner.new_address()
     }
 

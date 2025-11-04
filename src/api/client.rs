@@ -62,6 +62,39 @@ impl ScavengerClient {
         Ok(resp.json().await?)
     }
 
+    /// Works 100% with current backend:
+    /// Try to submit an intentionally invalid nonce.
+    /// If solution already exists → server returns "Solution already exists".
+    pub async fn probe_solution(&self, address: &str, challenge_id: &str) -> anyhow::Result<bool> {
+        let fake_nonce = "0000000000000000";
+
+        let url = self
+            .base
+            .join(&format!("/solution/{}/{}/{}", address, challenge_id, fake_nonce))?;
+
+        let resp = self.http.post(url).json(&serde_json::json!({})).send().await?;
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+
+        if status == 400 && body.contains("Solution already exists") {
+            return Ok(true);
+        }
+
+        if status == 400 {
+            return Ok(false); // "invalid nonce" → means not solved yet
+        }
+
+        if status.is_success() {
+            return Ok(false); // should never happen for fake nonce
+        }
+
+        Err(anyhow::anyhow!(
+            "unexpected solution probe response {} body={}",
+            status,
+            body
+        ))
+    }
 
     pub async fn donate_to(
         &self,
@@ -84,4 +117,3 @@ impl ScavengerClient {
         Ok(resp.text().await?)
     }
 }
-
