@@ -72,16 +72,16 @@ impl<P: AddressProvider + Clone> Miner<P> {
                     let idx_before = self.provider.current_index();
                     info!("Challenge {} — address index {}/{}", ch.challenge_number, idx_before, total.max(1));
 
-                    // Pick the first address in rotation that has NOT already submitted for this challenge.
-                    // We try at most `total` times; if everything is already used, we back off briefly.
-                    let chosen: Option<AddressBundle> = {
-                        let tries = total.max(1); // if total==0, still allow one try (freshly generated provider)
-                        let mut picked = None;
-                        for _ in 0..tries {
+                    let addr: AddressBundle = {
+                        let total = self.provider.total_addresses().max(1);
+                        let mut picked: Option<AddressBundle> = None;
+
+                        // Try all existing addresses first
+                        for _ in 0..total {
                             let a = self.provider.next_address()?;
                             match self.client.probe_solution(&a.address, &ch_id).await {
                                 Ok(true) => {
-                                    info!("Skipping address {} (already has solution for {})", a.address, ch_id);
+                                    info!("Skipping address {} (already used for {})", a.address, ch_id);
                                     continue;
                                 }
                                 Ok(false) => {
@@ -89,21 +89,32 @@ impl<P: AddressProvider + Clone> Miner<P> {
                                     break;
                                 }
                                 Err(e) => {
-                                    warn!("Probe failed for {} ({}). Will try next address.", a.address, e);
+                                    warn!("Probe failed for {}: {}", a.address, e);
                                     continue;
                                 }
                             }
                         }
-                        picked
-                    };
 
-                    // If all prefilled addresses are already used for this challenge, wait and re-poll.
-                    let addr = match chosen {
-                        Some(a) => a,
-                        None => {
-                            warn!("All prefilled addresses appear to have a solution for {}. Sleeping 30s.", ch_id);
-                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                            continue;
+                        // If none of the prefilled addresses were usable → generate NEW addresses until success.
+                        match picked {
+                            Some(a) => a,
+                            None => loop {
+                                warn!("All existing addresses used for {} — generating new address", ch_id);
+
+                                let a = self.provider.new_address()?;
+
+                                match self.client.probe_solution(&a.address, &ch_id).await {
+                                    Ok(true) => {
+                                        warn!("impossible, fresh address can't have a solution :/ {}", a.address);
+                                        continue;
+                                    }
+                                    Ok(false) => break a,
+                                    Err(e) => {
+                                        warn!("Probe failed for new address {}: {}", a.address, e);
+                                        continue;
+                                    }
+                                }
+                            },
                         }
                     };
 
