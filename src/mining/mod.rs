@@ -1,5 +1,6 @@
 pub mod worker;
 
+use crate::accounting::{Accounting, ReceiptRecord};
 use crate::api::{ScavengerClient, TandCResponse};
 use crate::address::{AddressBundle, AddressProvider};
 use crate::Network;
@@ -21,6 +22,8 @@ pub struct Miner<P: AddressProvider + Clone> {
     current_challenge_id: Arc<std::sync::Mutex<String>>,
     current_solutions: Arc<AtomicUsize>,
     global_solutions: Arc<AtomicUsize>,
+
+    accounting: Accounting,
 }
 
 impl<P: AddressProvider + Clone> Miner<P> {
@@ -33,6 +36,9 @@ impl<P: AddressProvider + Clone> Miner<P> {
         let workers = workers
             .unwrap_or_else(|| std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1));
 
+        let accounting = Accounting::new_from_env()
+            .expect("failed to init accounting (keystore missing?)");
+
         Self {
             client,
             provider,
@@ -42,6 +48,8 @@ impl<P: AddressProvider + Clone> Miner<P> {
             current_challenge_id: Arc::new(std::sync::Mutex::new(String::new())),
             current_solutions: Arc::new(AtomicUsize::new(0)),
             global_solutions: Arc::new(AtomicUsize::new(0)),
+
+            accounting,
         }
     }
 
@@ -50,6 +58,11 @@ impl<P: AddressProvider + Clone> Miner<P> {
     }
 
     pub async fn run_loop(&self, tandc: TandCResponse) -> Result<()> {
+        // Load STAR-per-receipt rates once at startup (ignore failure)
+        if let Ok(rates) = self.client.get_work_to_star_rate().await {
+            let _ = self.accounting.write_star_rates(&rates);
+        }
+
         loop {
             let env = self.client.get_challenge().await?;
 
@@ -58,30 +71,57 @@ impl<P: AddressProvider + Clone> Miner<P> {
                     let ch = env.challenge.context("missing challenge")?;
                     let ch_id = ch.challenge_id.clone();
 
-                    // Detect challenge change → reset per-challenge counter.
+                    //
+                    // CHALLENGE CHANGE LOGIC
+                    //
                     {
                         let mut cid = self.current_challenge_id.lock().unwrap();
+
                         if *cid != ch_id {
                             *cid = ch_id.clone();
                             self.current_solutions.store(0, Ordering::Relaxed);
+
+                            // Refresh STAR rates
+                            if let Ok(rates) = self.client.get_work_to_star_rate().await {
+                                let _ = self.accounting.write_star_rates(&rates);
+                            }
+
+                            // Log totals
+                            self.accounting.log_totals();
                         }
                     }
 
-                    // Show where we are in the prefilled rotation.
-                    let total = self.provider.total_addresses();
+                    //
+                    // LOG ADDRESS PROGRESS
+                    //
+                    let total = self.provider.total_addresses().max(1);
                     let idx_before = self.provider.current_index();
-                    info!("Challenge {} — address index {}/{}", ch.challenge_number, idx_before, total.max(1));
 
+                    info!(
+                        "Challenge {} — address index {}/{}",
+                        ch.challenge_number,
+                        idx_before,
+                        total
+                    );
+
+                    //
+                    // ADDRESS SELECTION:
+                    // 1. iterate through existing addresses
+                    // 2. skip used ones
+                    // 3. if all used → generate new addresses
+                    //
                     let addr: AddressBundle = {
-                        let total = self.provider.total_addresses().max(1);
                         let mut picked: Option<AddressBundle> = None;
 
-                        // Try all existing addresses first
                         for _ in 0..total {
                             let a = self.provider.next_address()?;
+
                             match self.client.probe_solution(&a.address, &ch_id).await {
                                 Ok(true) => {
-                                    info!("Skipping address {} (already used for {})", a.address, ch_id);
+                                    info!(
+                                        "Skipping address {} (already used for {})",
+                                        a.address, ch_id
+                                    );
                                     continue;
                                 }
                                 Ok(false) => {
@@ -95,20 +135,22 @@ impl<P: AddressProvider + Clone> Miner<P> {
                             }
                         }
 
-                        // If none of the prefilled addresses were usable → generate NEW addresses until success.
                         match picked {
                             Some(a) => a,
                             None => loop {
-                                warn!("All existing addresses used for {} — generating new address", ch_id);
+                                warn!(
+                                    "All existing addresses are used for {} — generating new address",
+                                    ch_id
+                                );
 
                                 let a = self.provider.new_address()?;
 
                                 match self.client.probe_solution(&a.address, &ch_id).await {
+                                    Ok(false) => break a,
                                     Ok(true) => {
-                                        warn!("impossible, fresh address can't have a solution :/ {}", a.address);
+                                        warn!("Fresh address unexpectedly marked used: {}", a.address);
                                         continue;
                                     }
-                                    Ok(false) => break a,
                                     Err(e) => {
                                         warn!("Probe failed for new address {}: {}", a.address, e);
                                         continue;
@@ -118,12 +160,16 @@ impl<P: AddressProvider + Clone> Miner<P> {
                         }
                     };
 
-                    // Register only after we know we’ll actually mine with it.
+                    //
+                    // REGISTER ADDRESS
+                    //
                     info!("Registering address {}", addr.address);
                     self.register_address(&tandc, &addr).await?;
                     info!("Registration OK");
 
-                    // Mine with this address.
+                    //
+                    // MINE
+                    //
                     let found = worker::mine_one_challenge(
                         &self.provider,
                         &addr,
@@ -132,35 +178,46 @@ impl<P: AddressProvider + Clone> Miner<P> {
                     )
                     .await?;
 
+                    //
+                    // SUBMIT
+                    //
                     if let Some(nonce_hex) = found {
-                        // Update counters first so the next log line reflects new totals.
-                        self.current_solutions.fetch_add(1, Ordering::Relaxed);
-                        self.global_solutions.fetch_add(1, Ordering::Relaxed);
-
-                        let per_ch = self.current_solutions.load(Ordering::Relaxed);
-                        let total_all = self.global_solutions.load(Ordering::Relaxed);
-
-                        info!(
-                            "Challenge {} — index {}/{} — nonce={}",
-                            ch.challenge_number,
-                            // show the index we *just moved to* in rotation for reference
-                            self.provider.current_index().saturating_sub(1),
-                            total.max(1),
-                            nonce_hex
-                        );
-
-                        // Submit.
                         let resp = self
                             .client
                             .submit_solution(&addr.address, &ch_id, &nonce_hex)
                             .await?;
 
+                        self.current_solutions.fetch_add(1, Ordering::Relaxed);
+                        self.global_solutions.fetch_add(1, Ordering::Relaxed);
+
+                        //
+                        // STORE RECEIPT
+                        //
+                        let rec = ReceiptRecord {
+                            timestamp: resp.crypto_receipt.timestamp.clone(),
+                            address: addr.address.clone(),
+                            challenge_id: ch_id.clone(),
+                            day: ch.day,
+                            challenge_number: ch.challenge_number,
+                        };
+
+                        if let Err(e) = self.accounting.append_receipt(&rec) {
+                            warn!("Failed to persist receipt: {e}");
+                        }
+
+                        //
+                        // LOG OUTPUT
+                        //
                         info!(
-                            "Submitted OK (receipt {}) — solutions this challenge: {} — total: {}",
-                            resp.crypto_receipt.timestamp,
-                            per_ch,
-                            total_all
+                            "Challenge {} — index {}/{} — nonce={}",
+                            ch.challenge_number,
+                            self.provider.current_index().saturating_sub(1),
+                            total,
+                            nonce_hex
                         );
+
+                        // NIGHT estimate (all-time)
+                        self.accounting.log_totals();
                     } else {
                         warn!("No solution found before next round / deadline");
                     }
@@ -188,12 +245,21 @@ impl<P: AddressProvider + Clone> Miner<P> {
         Ok(())
     }
 
-    async fn register_address(&self, tandc: &TandCResponse, a: &AddressBundle) -> Result<()> {
+    async fn register_address(
+        &self,
+        tandc: &TandCResponse,
+        a: &AddressBundle,
+    ) -> Result<()> {
         use crate::util::cip8::cose_sign1_ed25519_with_headers;
 
         let payload = tandc.message.trim_end();
 
-        let cose = cose_sign1_ed25519_with_headers(&a.privkey, payload, &a.address_raw, false);
+        let cose = cose_sign1_ed25519_with_headers(
+            &a.privkey,
+            payload,
+            &a.address_raw,
+            false,
+        );
 
         let sig_hex = hex::encode(cose);
         let pub_hex = hex::encode(a.pubkey);

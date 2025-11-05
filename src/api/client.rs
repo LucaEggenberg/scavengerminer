@@ -62,6 +62,18 @@ impl ScavengerClient {
         Ok(resp.json().await?)
     }
 
+    /// Fetch STAR-per-receipt array for each day.
+    /// Endpoint: GET /work_to_star_rate
+    /// - Example: [10882519, 7692307, 12487254]
+    /// - 1 NIGHT = 1_000_000 STAR
+    pub async fn get_work_to_star_rate(&self) -> anyhow::Result<Vec<u64>> {
+        let url = self.base.join("/work_to_star_rate")?;
+        let resp = self.http.get(url).send().await?.error_for_status()?;
+        // Server returns a plain JSON array of integers
+        let v: Vec<u64> = resp.json().await?;
+        Ok(v)
+    }
+
     /// Works 100% with current backend:
     /// Try to submit an intentionally invalid nonce.
     /// If solution already exists → server returns "Solution already exists".

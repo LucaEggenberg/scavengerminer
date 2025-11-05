@@ -2,10 +2,10 @@ mod api;
 mod address;
 mod mining;
 mod util;
+pub mod accounting;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
-use tokio::sync::watch; 
 use crate::address::AddressProvider; 
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
