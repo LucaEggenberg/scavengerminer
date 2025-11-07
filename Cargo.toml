@@ -28,7 +28,7 @@ bech32 = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 ciborium = { version = "0.2", features = ["std"] }
-ashmaize = { git = "https://github.com/input-output-hk/ce-ashmaize", package = "ashmaize" }
+ashmaize = { git = "https://github.com/input-output-hk/ce-ashmaize", rev = "58d6a1fe3df2582e14d53b67292ce8a36d90e7e6", package = "ashmaize" }
 crossterm = "0.27"
 
 [profile.release]
