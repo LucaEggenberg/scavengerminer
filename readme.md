@@ -34,7 +34,7 @@ or simply edit `run.sh` specifically change "donate-to" address and enter a vali
 
 ### build the flake
 ```sh
-nix build  git+https://github.com/LucaEggenberg/scavengerminer#miner
+nix build  github:LucaEggenberg/scavengerminer#miner
 ```
 
 the miner will appear here: `./result/bin/scavenger-miner`
