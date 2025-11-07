@@ -33,13 +33,13 @@ or simply edit `run.sh` specifically change "donate-to" address and enter a vali
 ## Installing the miner as a service (recommended)
 
 ### build the flake
+create a directory for your miner && build it
 ```sh
+mkdir miner && cd miner
 nix build  github:LucaEggenberg/scavengerminer#miner
 ```
 
 the miner will appear here: `./result/bin/scavenger-miner`
-
-copy it somewhere convenient.
 
 ### Running as Service
 
@@ -61,11 +61,11 @@ Paste:
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/<USER>/midnight-miner/scavenger-miner</string>
+        <string>/Users/<USER>/miner/result/bin/scavenger-miner</string>
         <string>--network</string>
         <string>mainnet</string>
         <string>--keystore</string>
-        <string>keystore</string>
+        <string>/Users/<USER>/miner/keystore</string>
         <string>--enable-donate</string>
         <string>--donate-to</string>
         <string><DONATION_ADDRESS></string>
@@ -76,7 +76,7 @@ Paste:
     <dict>
         <key>NETWORK</key><string>mainnet</string>
         <key>RUST_LOG</key><string>info</string>
-        <key>KEYSTORE</key><string>keystore</string>
+        <key>KEYSTORE</key><string>/Users/<USER>/miner/keystore</string>
         <key>SCAVENGER_API</key><string>https://scavenger.prod.gd.midnighttge.io</string>
     </dict>
 
