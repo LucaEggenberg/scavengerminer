@@ -43,7 +43,7 @@
           pname = "scavenger-miner";
           version = "0.1.0";
 
-          src = self;
+          src = ./.;
 
           cargoLock = {
             lockFile = ./Cargo.lock;
