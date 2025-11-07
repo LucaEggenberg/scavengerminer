@@ -1,5 +1,6 @@
 use ciborium::{ser, value::Value};
-use ed25519_dalek::{SigningKey, Signer};
+use ed25519_dalek::{SigningKey, Signer, SecretKey};
+use anyhow::Result;
 
 fn cbor_to_vec(v: &Value) -> Vec<u8> {
     let mut out = Vec::new();
@@ -47,6 +48,48 @@ pub fn cose_sign1_ed25519_with_headers(
     let sig = sk.sign(&to_sign).to_bytes().to_vec();
 
     // COSE_Sign1 array: [protected_bstr, unprotected_map, payload_bstr, signature_bstr]
+    let cose_sign1 = Value::Array(vec![
+        Value::Bytes(protected_bstr),
+        unprotected,
+        Value::Bytes(payload_bytes),
+        Value::Bytes(sig),
+    ]);
+
+    cbor_to_vec(&cose_sign1)
+}
+
+pub fn cose_sign1_donate(
+    privkey: &[u8; 32],
+    payload_utf8: &str,
+) -> Vec<u8> {
+    use ciborium::{ser, value::Value};
+    use ed25519_dalek::{SigningKey, Signer};
+
+    // protected header: empty map
+    let protected = Value::Map(vec![]);
+    let protected_bstr = cbor_to_vec(&protected);
+
+    // unprotected header: empty map
+    let unprotected = Value::Map(vec![]);
+
+    // payload raw bytes
+    let payload_bytes = payload_utf8.as_bytes().to_vec();
+
+    // Sig_structure = ["Signature1", protected_bstr, h"", payload]
+    let sig_structure = Value::Array(vec![
+        Value::Text("Signature1".into()),
+        Value::Bytes(protected_bstr.clone()),
+        Value::Bytes(vec![]),
+        Value::Bytes(payload_bytes.clone()),
+    ]);
+
+    let to_sign = cbor_to_vec(&sig_structure);
+
+    // Ed25519 sign
+    let sk = SigningKey::from_bytes(privkey);
+    let sig = sk.sign(&to_sign).to_bytes().to_vec();
+
+    // COSE_Sign1 = [ protected_bstr, unprotected_map, payload_bstr, signature_bstr ]
     let cose_sign1 = Value::Array(vec![
         Value::Bytes(protected_bstr),
         unprotected,

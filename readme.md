@@ -1,3 +1,13 @@
+# Scavenger-Miner
+
+This miner will participate in the scavenger hunt and dynamically generate new addresses to ensure your Computer is computing solutions around the clock.
+
+You can use the miner for free, and I will not take any share in your mined resources.
+
+## Disclaimers
+- 1: Donate-to currently does not work, you can Enable it anyways. it will log warnings
+- 2: The Donate-to address must not have mined previously
+
 # Quickstart
 
 ## Running the miner directly from the repo (recommended only for debugging)

@@ -1,6 +1,7 @@
 pub mod worker;
 
 use crate::accounting::{Accounting, ReceiptRecord};
+use crate::donations::{Donations, DonationRecord};
 use crate::api::{ScavengerClient, TandCResponse};
 use crate::address::{AddressBundle, AddressProvider};
 use crate::Network;
@@ -24,6 +25,10 @@ pub struct Miner<P: AddressProvider + Clone> {
     global_solutions: Arc<AtomicUsize>,
 
     accounting: Accounting,
+    donations: Donations,
+
+    enable_donate: bool,
+    donate_to: Option<String>,
 }
 
 impl<P: AddressProvider + Clone> Miner<P> {
@@ -32,12 +37,18 @@ impl<P: AddressProvider + Clone> Miner<P> {
         provider: P,
         workers: Option<usize>,
         network: Network,
+        enable_donate: bool,
+        donate_to: Option<String>,
     ) -> Self {
         let workers = workers
             .unwrap_or_else(|| std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1));
 
         let accounting = Accounting::new_from_env()
             .expect("failed to init accounting (keystore missing?)");
+
+
+        let donations = Donations::new_from_env()
+            .expect("failed to init donations (keystore missing?)");
 
         Self {
             client,
@@ -50,6 +61,10 @@ impl<P: AddressProvider + Clone> Miner<P> {
             global_solutions: Arc::new(AtomicUsize::new(0)),
 
             accounting,
+            donations,
+
+            enable_donate,
+            donate_to,
         }
     }
 
@@ -216,6 +231,21 @@ impl<P: AddressProvider + Clone> Miner<P> {
                             nonce_hex
                         );
 
+                        if self.enable_donate {
+                            if let Some(dest) = &self.donate_to {
+                                if !dest.is_empty() {
+                                    match self.perform_donate_to(dest, &addr).await {
+                                        Ok(()) => {
+                                            info!("Donated from {} → {}", addr.address, dest);
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed donate_to from {} → {}: {}", addr.address, dest, e);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // NIGHT estimate (all-time)
                         self.accounting.log_totals();
                     } else {
@@ -265,6 +295,40 @@ impl<P: AddressProvider + Clone> Miner<P> {
         let pub_hex = hex::encode(a.pubkey);
 
         self.client.register(&a.address, &sig_hex, &pub_hex).await?;
+        Ok(())
+    }
+
+    async fn perform_donate_to(&self, dest: &str, addr: &AddressBundle) -> Result<()> {
+        use crate::util::cip8::cose_sign1_ed25519_with_headers;
+        use crate::util::cip8::cose_sign1_donate;
+
+        // Donate signature payload is the *address itself*
+        let payload = addr.address.as_str();
+        let cose = cose_sign1_donate(&addr.privkey, payload);
+
+        let require_receipt = true;
+        let has_source_receipts = {
+            self.accounting
+                .read_all_receipts()?
+                .iter()
+                .any(|r| r.address == addr.address)
+        };
+
+        self.donations.can_donate(
+            &addr.address,
+            &dest,
+            require_receipt,
+            has_source_receipts,
+        )?;
+
+        let sig_hex = hex::encode(cose);
+
+        let resp = self
+            .client
+            .donate_to(dest, &addr.address, &sig_hex)
+            .await?;
+
+        info!("donate_to result: {}", resp);
         Ok(())
     }
 }

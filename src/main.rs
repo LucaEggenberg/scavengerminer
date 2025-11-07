@@ -3,6 +3,7 @@ mod address;
 mod mining;
 mod util;
 pub mod accounting;
+pub mod donations;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
@@ -100,7 +101,14 @@ async fn cmd_mine(cli: Cli) -> anyhow::Result<()> {
 
     let shelley = address::shelley::ShelleyProvider::new(cli.network, &cli.keystore).await?;
     let addr_provider = address::prefill::PrefillProvider::new(shelley, &cli.keystore)?;
-    let mut miner = Miner::new(client, addr_provider, cli.workers, cli.network);
+    let mut miner = Miner::new(
+        client, 
+        addr_provider, 
+        cli.workers, 
+        cli.network,
+        cli.enable_donate,
+        if cli.donate_to.is_empty() { None } else { Some(cli.donate_to) }
+    );
 
     // Run miner with stats
     miner.run_loop(tandc).await
