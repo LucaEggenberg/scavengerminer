@@ -48,7 +48,7 @@ launchctl unload ~/Library/LaunchAgents/io.midnight.scavenger.plist
 ### 4: Update the miner
 In your terminal, navigate to the miner folder and run:
 ```sh
-nix build github:LucaEggenberg/scavengerminer#miner
+nix build --refresh github:LucaEggenberg/scavengerminer#miner
 ```
 
 This will update the miner in `./result/bin/scavenger-miner`
