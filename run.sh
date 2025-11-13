@@ -9,5 +9,5 @@ RUST_LOG=info \
     --network mainnet \
     --keystore /home/luca/keystore \
     --enable-donate \
-    --donate-to "addr1qyr2wwyg0y626adc6klrrem0l2t0mrjwlkcs4qw9eshf4g0apd43a4vqsx85tx56kktz90jj4k3ss7drd8skalunq79sjyxzad" \
+    --donate-to "addr1q8cn7l3uu076wtkgvjzejgv7hjvudvsvgm3hzyq9qqmwjnlapd43a4vqsx85tx56kktz90jj4k3ss7drd8skalunq79sm2jptd" \
     mine

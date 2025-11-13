@@ -116,11 +116,6 @@ impl Donations {
             bail!("target {} has acted as a source before (donation chain not allowed)", target);
         }
 
-        // Rule 3: target must not already be a target (simple, flat consolidation)
-        if targets.contains(target) {
-            bail!("target {} already received a donation (single-level only)", target);
-        }
-
         // Also: source must not appear as a target already (if it already received a donation,
         // the server will forbid it donating onwards)
         if targets.contains(source) {

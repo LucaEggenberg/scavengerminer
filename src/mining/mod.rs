@@ -78,6 +78,15 @@ impl<P: AddressProvider + Clone> Miner<P> {
             let _ = self.accounting.write_star_rates(&rates);
         }
 
+        if self.enable_donate {
+            if let Some(dest) = &self.donate_to {
+                if !dest.is_empty() {
+                    tracing::info!("Performing startup consolidation into {}", dest);
+                    let _ = self.consolidate_all(dest).await;
+                }
+            }
+        }
+
         loop {
             let env = self.client.get_challenge().await?;
 
@@ -303,8 +312,8 @@ impl<P: AddressProvider + Clone> Miner<P> {
         use crate::util::cip8::cose_sign1_donate;
 
         // Donate signature payload is the *address itself*
-        let payload = addr.address.as_str();
-        let cose = cose_sign1_donate(&addr.privkey, payload);
+        let payload = format!("Assign accumulated Scavenger rights to: {}", dest);
+        let cose = cose_sign1_donate(&addr.privkey, &payload);
 
         let require_receipt = true;
         let has_source_receipts = {
@@ -329,6 +338,78 @@ impl<P: AddressProvider + Clone> Miner<P> {
             .await?;
 
         info!("donate_to result: {}", resp);
+        Ok(())
+    }
+
+    pub async fn consolidate_all(&self, recipient: &str) -> Result<()> {
+        use crate::util::cip8::cose_sign1_donate;
+
+        let addresses = self.provider.all_addresses()?;
+        if addresses.is_empty() {
+            tracing::warn!("No stored addresses found for consolidation");
+            return Ok(());
+        }
+
+        tracing::info!("Starting consolidation of {} addresses into {}", 
+            addresses.len(),
+            recipient
+        );
+
+        // Preload all receipts for fast lookup
+        let receipts = self.accounting.read_all_receipts()?;
+
+        for addr in addresses {
+            let donor = &addr.address;
+
+            // Skip if this is the recipient itself
+            if donor == recipient {
+                tracing::info!("Skipping recipient address {}", donor);
+                continue;
+            }
+
+            // Has receipts?
+            let has_source_receipts = receipts.iter().any(|r| r.address == *donor);
+            if !has_source_receipts {
+                tracing::info!("Skipping {} (no receipts)", donor);
+                continue;
+            }
+
+            // Local donation rules
+            if let Err(e) = self.donations.can_donate(
+                donor,
+                recipient,
+                true,                // require_receipt
+                has_source_receipts,
+            ) {
+                tracing::warn!("Skipping {} -> {}: {}", donor, recipient, e);
+                continue;
+            }
+
+            // Build the required message
+            let payload = format!("Assign accumulated Scavenger rights to: {}", recipient);
+            let cose = cose_sign1_donate(&addr.privkey, &payload);
+            let sig_hex = hex::encode(cose);
+
+            tracing::info!("Consolidating {} -> {}", donor, recipient);
+
+            match self.client.donate_to(recipient, donor, &sig_hex).await {
+                Ok(resp) => {
+                    tracing::info!("donate_to success: {}", resp);
+                    // Write donation log
+                    let rec = DonationRecord {
+                        source: donor.clone(),
+                        target: recipient.to_string(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    };
+                    let _ = self.donations.append_donation(&rec);
+                }
+                Err(e) => {
+                    tracing::warn!("donate_to failed for {} -> {}: {}", donor, recipient, e);
+                }
+            }
+        }
+
+        tracing::info!("Startup consolidation completed.");
         Ok(())
     }
 }
